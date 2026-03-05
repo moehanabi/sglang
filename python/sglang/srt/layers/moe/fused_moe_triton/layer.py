@@ -956,10 +956,7 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, topk_output: TopKOutput):
         if is_in_piecewise_cuda_graph():
-            if not TopKOutputChecker.format_is_standard(topk_output):
-                # Make sure there is torch lib op registration for the whole moe layer
-                return self.forward_impl(hidden_states, topk_output)
-            else:
+            if TopKOutputChecker.format_is_standard(topk_output):
                 return moe_forward_piecewise_cuda_graph_impl(
                     hidden_states,
                     topk_output.topk_weights,
@@ -967,6 +964,28 @@ class FusedMoE(torch.nn.Module):
                     topk_output.router_logits,
                     self.layer_id,
                 )
+            elif TopKOutputChecker.format_is_bypassed(topk_output):
+                return bypassed_moe_forward_piecewise_cuda_graph_impl(
+                    hidden_states,
+                    topk_output.router_logits,
+                    topk_output.topk_config.top_k,
+                    topk_output.topk_config.use_grouped_topk,
+                    topk_output.topk_config.topk_group,
+                    topk_output.topk_config.num_expert_group,
+                    topk_output.topk_config.renormalize,
+                    topk_output.topk_config.num_fused_shared_experts,
+                    topk_output.topk_config.correction_bias,
+                    topk_output.topk_config.torch_native,
+                    topk_output.topk_config.routed_scaling_factor,
+                    topk_output.topk_config.apply_routed_scaling_factor_on_output,
+                    topk_output.topk_config.fused_shared_experts_scaling_factor,
+                    topk_output.topk_config.scoring_func,
+                    topk_output.num_token_non_padded,
+                    self.layer_id,
+                )
+            else:
+                # Fallback for other formats (e.g., TritonKernel)
+                return self.forward_impl(hidden_states, topk_output)
         else:
             return self.forward_impl(hidden_states, topk_output)
 
@@ -1171,9 +1190,18 @@ class FlashInferFP4MoE(FusedMoE):
                 hidden_states,
                 topk_output.router_logits,
                 topk_output.topk_config.top_k,
+                topk_output.topk_config.use_grouped_topk,
                 topk_output.topk_config.topk_group,
                 topk_output.topk_config.num_expert_group,
+                topk_output.topk_config.renormalize,
+                topk_output.topk_config.num_fused_shared_experts,
                 topk_output.topk_config.correction_bias,
+                topk_output.topk_config.torch_native,
+                topk_output.topk_config.routed_scaling_factor,
+                topk_output.topk_config.apply_routed_scaling_factor_on_output,
+                topk_output.topk_config.fused_shared_experts_scaling_factor,
+                topk_output.topk_config.scoring_func,
+                topk_output.num_token_non_padded,
                 self.layer_id,
             )
         else:
@@ -1289,13 +1317,22 @@ def moe_forward_piecewise_cuda_graph_impl(
 
 
 @register_custom_op(out_shape="hidden_states")
-def flashinfer_fp4_moe_forward_piecewise_cuda_graph_impl(
+def bypassed_moe_forward_piecewise_cuda_graph_impl(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     top_k: int,
+    use_grouped_topk: bool,
     topk_group: Optional[int],
     num_expert_group: Optional[int],
+    renormalize: bool,
+    num_fused_shared_experts: int,
     correction_bias: Optional[torch.Tensor],
+    torch_native: bool,
+    routed_scaling_factor: Optional[float],
+    apply_routed_scaling_factor_on_output: bool,
+    fused_shared_experts_scaling_factor: Optional[float],
+    scoring_func: str,
+    num_token_non_padded: Optional[torch.Tensor],
     layer_id: int,
 ) -> torch.Tensor:
     topk_output = BypassedTopKOutput(
@@ -1303,10 +1340,62 @@ def flashinfer_fp4_moe_forward_piecewise_cuda_graph_impl(
         router_logits=router_logits,
         topk_config=TopKConfig(
             top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
+            renormalize=renormalize,
+            num_fused_shared_experts=num_fused_shared_experts,
             correction_bias=correction_bias,
+            torch_native=torch_native,
+            routed_scaling_factor=routed_scaling_factor,
+            apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+            fused_shared_experts_scaling_factor=fused_shared_experts_scaling_factor,
+            scoring_func=scoring_func,
         ),
+        num_token_non_padded=num_token_non_padded,
+    )
+    forward_context = get_forward_context()
+    moe_layer = forward_context.moe_layers[layer_id]
+    return moe_layer.forward_impl(hidden_states, topk_output)
+
+
+@register_custom_op(out_shape="hidden_states")
+def flashinfer_fp4_moe_forward_piecewise_cuda_graph_impl(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    top_k: int,
+    use_grouped_topk: bool,
+    topk_group: Optional[int],
+    num_expert_group: Optional[int],
+    renormalize: bool,
+    num_fused_shared_experts: int,
+    correction_bias: Optional[torch.Tensor],
+    torch_native: bool,
+    routed_scaling_factor: Optional[float],
+    apply_routed_scaling_factor_on_output: bool,
+    fused_shared_experts_scaling_factor: Optional[float],
+    scoring_func: str,
+    num_token_non_padded: Optional[torch.Tensor],
+    layer_id: int,
+) -> torch.Tensor:
+    topk_output = BypassedTopKOutput(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        topk_config=TopKConfig(
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            renormalize=renormalize,
+            num_fused_shared_experts=num_fused_shared_experts,
+            correction_bias=correction_bias,
+            torch_native=torch_native,
+            routed_scaling_factor=routed_scaling_factor,
+            apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+            fused_shared_experts_scaling_factor=fused_shared_experts_scaling_factor,
+            scoring_func=scoring_func,
+        ),
+        num_token_non_padded=num_token_non_padded,
     )
     forward_context = get_forward_context()
     moe_layer = forward_context.moe_layers[layer_id]

@@ -138,6 +138,21 @@ def set_torch_compile_config():
     if hasattr(torch._dynamo.config, "cache_size_limit"):
         torch._dynamo.config.cache_size_limit = 1024
 
+    # Ignore logger methods during torch.compile tracing to avoid graph breaks.
+    # Third-party libraries like flashinfer use logger calls (e.g., logger.debug)
+    # inside functions that are traced by torch.dynamo, which causes
+    # "Logger not supported for non-export cases" errors.
+    if hasattr(torch._dynamo.config, "ignore_logger_methods"):
+        torch._dynamo.config.ignore_logger_methods.update(
+            {
+                logging.Logger.debug,
+                logging.Logger.info,
+                logging.Logger.warning,
+                logging.Logger.error,
+                logging.Logger.critical,
+            }
+        )
+
 
 class PiecewiseCudaGraphRunner:
     """A PiecewiseCudaGraphRunner runs the forward pass of a model with cuda graph and torch.compile."""
