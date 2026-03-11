@@ -2224,6 +2224,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
             return
 
+        # Disable piecewise CUDA graph for EAGLE models
+        if not hasattr(self.model.model, "layers"):
+            log_info_on_rank0(
+                logger,
+                f"Disable piecewise CUDA graph for {type(self.model.model).__name__} as it has no 'layers' attribute.",
+            )
+            return
+
         # Disable piecewise CUDA graph for non capture size
         if not self.server_args.piecewise_cuda_graph_tokens:
             logger.warning(
